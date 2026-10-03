@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, HostListener, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, HostListener, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
@@ -13,7 +13,9 @@ import { NzSwitchModule } from 'ng-zorro-antd/switch';
 import { NzTabsModule } from 'ng-zorro-antd/tabs';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
-import { METER_TEMPLATES, PoetryStoreService } from './services/poetry-store.service';
+import { ImportReport, METER_TEMPLATES, PoetryStoreService } from './services/poetry-store.service';
+import { PackageValidationError } from './models/collation.models';
+import type { PendingConflict } from './models/poem.models';
 
 @Component({
   selector: 'app-root',
@@ -42,6 +44,11 @@ export class AppComponent {
   readonly templates = METER_TEMPLATES;
   readonly selectedCell = computed(() => this.store.selectedCell());
 
+  readonly packageName = signal('');
+  readonly importing = signal(false);
+  readonly importError = signal('');
+  readonly activeTab = signal(0);
+
   get totalErrors(): number {
     return this.store.issues().filter((issue) => issue.level === 'error').length;
   }
@@ -66,6 +73,59 @@ export class AppComponent {
 
   updateVersionSource(source: string): void {
     this.store.updateVersionSource(source);
+  }
+
+  captureBaseline(): void {
+    const baseline = this.store.captureBaseline();
+    this.store.toast.set(`已保存修改基线（修订号 ${baseline.revision}）`);
+  }
+
+  exportPackage(): void {
+    this.store.downloadCollationPackage(this.packageName());
+  }
+
+  async onPackageFile(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    this.importing.set(true);
+    this.importError.set('');
+    try {
+      const report: ImportReport = await this.store.importCollationPackage(file);
+      if (report.conflicts > 0) this.activeTab.set(3);
+    } catch (error) {
+      this.importError.set(error instanceof PackageValidationError ? error.message : `导入失败：${String(error)}`);
+    } finally {
+      this.importing.set(false);
+      input.value = '';
+    }
+  }
+
+  retryCheckpoint(): void {
+    this.importError.set('');
+    try {
+      const report = this.store.retryImportFromCheckpoint();
+      if (report?.conflicts) this.activeTab.set(3);
+    } catch (error) {
+      this.importError.set(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  discardCheckpoint(): void {
+    this.store.discardCheckpoint();
+  }
+
+  resolve(conflict: PendingConflict, resolution: 'incoming' | 'current' | 'both'): void {
+    this.store.resolveConflict(conflict.id, resolution);
+  }
+
+  locate(conflict: PendingConflict): void {
+    this.store.locateConflict(conflict);
+    this.activeTab.set(0);
+  }
+
+  fieldLabel(field: PendingConflict['fields'][number]): string {
+    return { text: '用字', tone: '平仄', rhyme: '韵组', pauseAfter: '停顿', basis: '依据', note: '批注' }[field];
   }
 
   trackTemplate(index: number, item: (typeof METER_TEMPLATES)[number]): string {

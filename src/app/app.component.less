@@ -63,8 +63,12 @@ p { margin: 0; }
 .poem-meta label { color: #8d887c; font-size: 11px; }
 .poem-meta input { width: 150px; }
 .poem-meta span { color: #5f5b53; font-size: 13px; }
+.poem-meta .editor-input { width: 170px; }
 .template-select { width: 330px; }
 .issue-pills { margin-left: auto; display: flex; gap: 6px; }
+
+.checkpoint-alert { margin: 0 2px 10px; }
+.checkpoint-actions { margin-top: 8px; display: flex; gap: 8px; }
 
 .main-tabs ::ng-deep .ant-tabs-nav { margin: 0 0 14px; }
 .main-tabs ::ng-deep .ant-tabs-tab { padding: 10px 4px; font-family: "Songti SC", "STSong", serif; font-size: 14px; }
@@ -145,6 +149,15 @@ kbd { display: inline-grid; min-width: 21px; height: 21px; padding: 0 5px; place
 .meter-character.is-variant { background: #fbf4e3; border-color: #e0c88f; }
 .meter-character.is-error { background: #faecea; border-color: #daa29e; }
 .meter-character.is-unknown { background: #f1f0ec; border-color: #d3d0c8; }
+.meter-character.is-conflict {
+  border-color: #c25b4d;
+  box-shadow: 0 0 0 2px rgba(194, 91, 77, .18);
+  background:
+    repeating-linear-gradient(135deg, rgba(214, 122, 108, .06) 0 8px, transparent 8px 16px),
+    #fdf3f1;
+}
+.reading-flag { color: #2f6656 !important; }
+.conflict-flag { color: #b0473b !important; font-weight: 700; }
 .expected { display: block; color: #999285; font: 9px/1.2 "Songti SC", serif; }
 .hanzi { display: block; margin: 6px 0 4px; font: 27px/1 "Songti SC", "STSong", serif; }
 .mark-row { display: flex; height: 14px; align-items: center; justify-content: center; gap: 3px; }
@@ -161,6 +174,25 @@ kbd { display: inline-grid; min-width: 21px; height: 21px; padding: 0 5px; place
 .tone-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
 .tone-buttons button { padding-inline: 4px; }
 .switch-line { display: flex; align-items: center; gap: 8px; color: #747068; font-size: 11px; }
+.cell-conflict-alert { margin-top: 12px; }
+.sourced-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.sourced-reading {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid #d7e0d4;
+  border-radius: 20px;
+  background: #f2f7f0;
+  color: #3f6652;
+}
+.sourced-reading b { font: 15px/1.2 "Songti SC", serif; }
+.sourced-reading i { font-style: normal; font-size: 9px; color: #75846f; }
+.sourced-reading.is-adopted { border-color: #8fb39e; background: #e3f1e9; }
+.annotation-list { display: grid; gap: 6px; max-height: 160px; overflow: auto; }
+.annotation-row { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-size: 11px; line-height: 1.6; color: #5a574e; }
+.annotation-row span { flex: 1; }
+.annotation-row small { color: #989287; font-size: 9px; white-space: nowrap; }
 
 .audit-layout { display: grid; grid-template-columns: minmax(560px, 1.15fr) minmax(380px, .85fr); gap: 12px; align-items: start; }
 .issue-list { padding: 9px; display: grid; gap: 7px; }
@@ -234,6 +266,40 @@ kbd { display: inline-grid; min-width: 21px; height: 21px; padding: 0 5px; place
 .compare-note { margin-top: 14px; }
 
 .version-layout { display: grid; grid-template-columns: 1fr 330px; gap: 12px; align-items: start; }
+.baseline-bar { display: flex; align-items: center; gap: 12px; padding: 0 14px 16px; }
+.baseline-bar span { color: #8b867b; font-size: 10px; }
+.version-card em.no-baseline { color: #b08a4a; }
+.export-panel .export-package-btn { margin-bottom: 4px; }
+
+.merge-layout { display: grid; grid-template-columns: minmax(560px, 1.25fr) minmax(340px, .75fr); gap: 12px; align-items: start; }
+.merge-empty { padding: 34px 16px; }
+.conflict-list { padding: 12px; display: grid; gap: 10px; max-height: 64vh; overflow: auto; }
+.conflict-card { padding: 13px 14px; border: 1px solid #e6d2c8; border-radius: 10px; background: #fffaf7; }
+.conflict-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.conflict-head strong { font: 13px "Songti SC", serif; color: #7a3a2e; }
+.conflict-tags { display: inline-flex; gap: 4px; }
+.conflict-chars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }
+.conflict-char { display: grid; gap: 4px; padding: 10px; text-align: center; border-radius: 8px; border: 1px dashed #d9c9bf; background: #fff; }
+.conflict-char small { color: #978f84; font-size: 9px; }
+.conflict-char b { font: 30px/1.1 "Songti SC", "STSong", serif; }
+.conflict-char.current { border-color: #b7c7ba; background: #f1f6f1; }
+.conflict-char.base b { color: #9a948a; }
+.conflict-char.incoming { border-color: #d9a48f; background: #fdf2ec; }
+.conflict-reason { margin: 0 0 6px; color: #6f5a4e; font-size: 11px; line-height: 1.7; }
+.conflict-note { margin: 0 0 10px; color: #8a7b5e; font-size: 10px; }
+.conflict-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.package-panel { padding: 18px; position: sticky; top: 12px; }
+.package-panel h2 { margin: 4px 0 10px; }
+.package-panel p { color: #737068; font-size: 12px; line-height: 1.7; }
+.package-file { width: 100%; font-size: 12px; }
+.package-hint { margin-top: 8px !important; color: #9b6d3b !important; }
+.package-empty { margin: 10px 0; }
+.package-history { display: grid; gap: 8px; max-height: 34vh; overflow: auto; }
+.package-record { display: grid; gap: 4px; padding: 9px 10px; border: 1px solid #e5e1d8; border-radius: 8px; background: #fbfaf6; }
+.package-record strong { font-size: 12px; }
+.package-record small { color: #918b80; font-size: 9px; }
+.package-record span { display: flex; flex-wrap: wrap; gap: 4px; }
 .version-grid { padding: 12px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .version-card {
   min-height: 185px;
@@ -276,6 +342,8 @@ kbd { display: inline-grid; min-width: 21px; height: 21px; padding: 0 5px; place
   .meter-panel { order: 1; overflow-x: auto; }
   .inspector-panel { order: 3; grid-template-columns: 1fr; }
   .audit-layout, .version-layout { grid-template-columns: 1fr; }
+  .merge-layout { grid-template-columns: 1fr; }
+  .package-panel { position: static; }
   .version-grid { grid-template-columns: repeat(2, 1fr); }
   .compare-toolbar { flex-wrap: wrap; }
 }

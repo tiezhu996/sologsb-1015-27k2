@@ -32,6 +32,8 @@
       <input nz-input [ngModel]="store.workspace().title" (ngModelChange)="store.updateTitle($event)" />
       <label>作者</label>
       <span>{{ store.workspace().author }}</span>
+      <label>整理者署名</label>
+      <input nz-input class="editor-input" placeholder="如 王校 / 整理组甲" [ngModel]="store.workspace().editor" (ngModelChange)="store.setEditor($event)" />
     </div>
     <nz-select class="template-select" [ngModel]="store.workspace().templateId" (ngModelChange)="store.setTemplate($event)">
       @for (template of templates; track template.id) {
@@ -41,11 +43,40 @@
     <div class="issue-pills">
       <nz-tag nzColor="error">{{ totalErrors }} 处出律</nz-tag>
       <nz-tag nzColor="warning">{{ totalWarnings }} 处待核</nz-tag>
+      <nz-tag [nzColor]="store.activeConflicts().length ? 'volcano' : 'default'">{{ store.activeConflicts().length }} 处待确认</nz-tag>
       <nz-tag>{{ store.differences().length }} 处异文</nz-tag>
     </div>
   </section>
 
-  <nz-tabset nzType="line" class="main-tabs">
+  @if (store.importCheckpoint(); as checkpoint) {
+    <nz-alert
+      class="checkpoint-alert"
+      [nzType]="checkpoint.failed ? 'error' : 'warning'"
+      nzShowIcon
+      [nzMessage]="checkpoint.failed ? '上次校勘包导入失败，已保存检查点' : '存在未完成的导入检查点'"
+      [nzDescription]="checkpoint.failed ? ('包：' + checkpoint.packageName + '；整理者：' + checkpoint.editor + '；原因：' + (checkpoint.error || '未知错误')) : ('包：' + checkpoint.packageName)">
+      <div class="checkpoint-actions">
+        <button nz-button nzSize="small" nzType="primary" (click)="retryCheckpoint()">从检查点重试</button>
+        <button nz-button nzSize="small" (click)="discardCheckpoint()">放弃检查点</button>
+      </div>
+    </nz-alert>
+  }
+  @if (importError()) {
+    <nz-alert class="checkpoint-alert" nzType="error" nzShowIcon [nzMessage]="importError()" nzCloseable (nzOnClose)="importError.set('')"></nz-alert>
+  }
+  @if (store.lastImportReport(); as report) {
+    <nz-alert
+      class="checkpoint-alert"
+      nzType="success"
+      nzShowIcon
+      [nzMessage]="report.message"
+      [nzDescription]="report.migrated || report.warnings.length ? report.warnings.join('；') : null"
+      nzCloseable
+      (nzOnClose)="store.lastImportReport.set(null)"
+    ></nz-alert>
+  }
+
+  <nz-tabset nzType="line" class="main-tabs" [nzSelectedIndex]="activeTab()" (nzSelectedIndexChange)="activeTab.set($event)">
     <nz-tab nzTitle="逐字标注">
       <div class="meter-workbench">
         <aside class="source-panel surface">
@@ -106,8 +137,9 @@
                       [class.is-variant]="cell.status === 'variant'"
                       [class.is-error]="cell.status === 'error'"
                       [class.is-unknown]="cell.status === 'unknown'"
+                      [class.is-conflict]="store.hasConflict(line.index, cell.position)"
                       nz-tooltip
-                      [nzTooltipTitle]="cell.message"
+                      [nzTooltipTitle]="store.hasConflict(line.index, cell.position) ? '此字位有待确认的离线合并冲突' : cell.message"
                       (click)="store.selectCell(line.index, cell.position)"
                     >
                       <span class="expected">{{ cell.expected }}／{{ cell.actual }}</span>
@@ -115,6 +147,8 @@
                       <span class="mark-row">
                         @if (cell.mark.rhyme) { <em>{{ cell.mark.rhyme }}</em> }
                         @if (cell.mark.pauseAfter) { <i>顿</i> }
+                        @if (cell.readings.length) { <i class="reading-flag">异×{{ cell.readings.length }}</i> }
+                        @if (store.hasConflict(line.index, cell.position)) { <i class="conflict-flag">待裁</i> }
                       </span>
                     </button>
                   }
@@ -176,6 +210,39 @@
               [ngModel]="cell.mark.note"
               (ngModelChange)="store.setMark({ note: $event })"
             ></textarea>
+            @if (store.hasConflict(store.selectedLine(), cell.position)) {
+              <nz-alert
+                class="cell-conflict-alert"
+                nzType="warning"
+                nzShowIcon
+                nzMessage="此字位有离线合并冲突待确认"
+                nzDescription="不同整理者改了同一字位，前往「离线合并」裁决；在此之前异文已按来源保留。"
+              >
+                <button nz-button nzSize="small" nzType="primary" (click)="activeTab.set(3)">前往裁决</button>
+              </nz-alert>
+            }
+            @if (cell.readings.length) {
+              <label class="field-label">异文来源（{{ cell.readings.length }}）</label>
+              <div class="sourced-list">
+                @for (reading of cell.readings; track reading.packageId + reading.char) {
+                  <span class="sourced-reading" [class.is-adopted]="reading.adopted">
+                    <b>{{ reading.char }}</b><i>{{ reading.adopted ? '采用 · ' : '' }}{{ reading.editor }}</i>
+                  </span>
+                }
+              </div>
+            }
+            @if (cell.annotations.length) {
+              <label class="field-label">来源批注与依据（{{ cell.annotations.length }}）</label>
+              <div class="annotation-list">
+                @for (annotation of cell.annotations; track annotation.id) {
+                  <p class="annotation-row">
+                    <nz-tag [nzColor]="annotation.kind === 'note' ? 'gold' : 'geekblue'">{{ annotation.kind === 'note' ? '批注' : '依据' }}</nz-tag>
+                    <span>{{ annotation.text }}</span>
+                    <small>— {{ annotation.editor }}</small>
+                  </p>
+                }
+              </div>
+            }
             <nz-divider></nz-divider>
             <button nz-button nzBlock (click)="store.addAntithesis()">将此句加入对仗关系</button>
           } @else {
@@ -282,11 +349,93 @@
       </section>
     </nz-tab>
 
+    <nz-tab nzTitle="离线合并">
+      <div class="merge-layout">
+        <section class="surface conflict-panel">
+          <div class="section-title">
+            <div>
+              <span class="overline">OFFLINE MERGE</span>
+              <h2>待确认冲突</h2>
+            </div>
+            <nz-tag [nzColor]="store.pendingConflicts().length ? 'volcano' : 'green'">
+              {{ store.pendingConflicts().length }} 处待裁
+            </nz-tag>
+          </div>
+          @if (store.pendingConflicts().length === 0) {
+            <div class="merge-empty">
+              <nz-empty nzNotFoundContent="没有待确认冲突；相同字位的改动已自动合并，不同用字均已按来源保留。"></nz-empty>
+            </div>
+          }
+          <div class="conflict-list">
+            @for (conflict of store.pendingConflicts(); track conflict.id) {
+              <article class="conflict-card">
+                <div class="conflict-head">
+                  <strong>第 {{ conflict.line + 1 }} 句 · 第 {{ conflict.position + 1 }} 字</strong>
+                  <span class="conflict-tags">
+                    @for (field of conflict.fields; track field) {
+                      <nz-tag nzColor="orange">{{ fieldLabel(field) }}</nz-tag>
+                    }
+                  </span>
+                </div>
+                <div class="conflict-chars">
+                  <div class="conflict-char current">
+                    <small>本机现稿</small><b>{{ conflict.currentChar || '□' }}</b>
+                  </div>
+                  <div class="conflict-char base">
+                    <small>基线</small><b>{{ conflict.baselineChar || '□' }}</b>
+                  </div>
+                  <div class="conflict-char incoming">
+                    <small>来稿 · {{ conflict.editor }}</small><b>{{ conflict.incomingChar || '□' }}</b>
+                  </div>
+                </div>
+                <p class="conflict-reason">{{ conflict.reason }}</p>
+                @if (conflict.note) { <p class="conflict-note">来稿批注：{{ conflict.note }}</p> }
+                <div class="conflict-actions">
+                  <button nz-button nzType="primary" (click)="resolve(conflict, 'incoming')">采纳来稿</button>
+                  <button nz-button (click)="resolve(conflict, 'current')">保留本机</button>
+                  <button nz-button (click)="resolve(conflict, 'both')">并存为异文</button>
+                  <button nz-button nzType="link" (click)="locate(conflict)">定位字格</button>
+                </div>
+              </article>
+            }
+          </div>
+        </section>
+
+        <aside class="surface package-panel">
+          <span class="overline">COLLATION PACKAGE</span>
+          <h2>导入校勘包</h2>
+          <p>校勘包按字位与本机稿对账：相同改动自动合并，不同用字保留来源，已有异文与批注不会被覆盖；同一包重复导入只记一条。</p>
+          <label class="field-label">选择整理者回传的 .json 校勘包</label>
+          <input type="file" class="package-file" accept=".json,application/json" (change)="onPackageFile($event)" [disabled]="importing()" />
+          @if (importing()) { <p class="package-hint">正在按字位对账…</p> }
+          <nz-divider></nz-divider>
+          <span class="overline">IMPORT HISTORY</span>
+          <h2>已导入校勘包</h2>
+          @if (store.importedPackages().length === 0) {
+            <nz-empty class="package-empty" nzNotFoundContent="尚未导入过校勘包"></nz-empty>
+          }
+          <div class="package-history">
+            @for (record of store.importedPackages(); track record.packageId) {
+              <div class="package-record">
+                <strong>{{ record.name }}</strong>
+                <small>{{ record.editor }} · {{ record.exportedAt | date: 'MM-dd HH:mm' }}</small>
+                <span>
+                  <nz-tag nzColor="green">{{ record.applied }} 合并</nz-tag>
+                  @if (record.conflicts) { <nz-tag nzColor="volcano">{{ record.conflicts }} 冲突</nz-tag> }
+                  <nz-tag>{{ record.changeCount }} 改动</nz-tag>
+                </span>
+              </div>
+            }
+          </div>
+        </aside>
+      </div>
+    </nz-tab>
+
     <nz-tab nzTitle="版本与导出">
       <div class="version-layout">
         <section class="surface version-cards">
           <div class="section-title">
-            <div><span class="overline">VERSIONS</span><h2>校勘版本</h2></div>
+            <div><span class="overline">VERSIONS</span><h2>校勘版本与修改基线</h2></div>
             <button nz-button (click)="store.duplicateActiveAsBaseline()">以当前版本为比较底本</button>
           </div>
           <div class="version-grid">
@@ -296,16 +445,33 @@
                 <strong>{{ version.name }}</strong>
                 <small>{{ version.source }}</small>
                 <p>{{ version.text.replace('\n', ' / ') }}</p>
-                <em>{{ version.createdAt | date: 'yyyy-MM-dd HH:mm' }}</em>
+                @if (version.baseline; as baseline) {
+                  <em>基线 {{ baseline.revision }} · {{ store.pendingChangeCount(version) }} 处待导出改动</em>
+                } @else {
+                  <em class="no-baseline">尚未保存修改基线</em>
+                }
               </button>
             }
           </div>
+          <div class="baseline-bar">
+            <button nz-button nzType="primary" (click)="captureBaseline()">为当前版本保存修改基线</button>
+            <span>基线包含正文与逐字标注快照，校勘包据此记录相对基线的改动。</span>
+          </div>
         </section>
         <aside class="surface export-panel">
+          <span class="overline">COLLATION PACKAGE</span>
+          <h2>导出离线校勘包</h2>
+          <p>包内含作品标识、整理者署名、修改基线与逐字位改动，断网可回传；异文与批注均带来源。</p>
+          <label class="field-label">整理者署名</label>
+          <input nz-input placeholder="如 王校 / 整理组甲" [ngModel]="store.workspace().editor" (ngModelChange)="store.setEditor($event)" />
+          <label class="field-label">校勘包名称（可选）</label>
+          <input nz-input placeholder="如 王校-春晓-初二轮" [ngModel]="packageName()" (ngModelChange)="packageName.set($event)" />
+          <button class="export-package-btn" nz-button nzType="primary" nzSize="large" nzBlock (click)="exportPackage()">导出 .json 校勘包</button>
+          <nz-divider></nz-divider>
           <span class="overline">PROOFREAD EXPORT</span>
           <h2>导出校对稿</h2>
-          <p>包含逐字平仄、韵组、判断依据、出律提示与对仗记录。</p>
-          <button nz-button nzType="primary" nzSize="large" nzBlock (click)="store.downloadProofreadCopy()">导出 Markdown 校对稿</button>
+          <p>包含逐字平仄、韵组、判断依据、异文来源、待确认冲突与对仗记录。</p>
+          <button nz-button nzBlock (click)="store.downloadProofreadCopy()">导出 Markdown 校对稿</button>
           <nz-divider></nz-divider>
           <label class="field-label">当前底本说明</label>
           <input nz-input [ngModel]="store.activeVersion().source" (ngModelChange)="updateVersionSource($event)" />
