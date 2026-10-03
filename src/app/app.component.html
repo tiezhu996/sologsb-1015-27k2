@@ -176,6 +176,26 @@
               [ngModel]="cell.mark.note"
               (ngModelChange)="store.setMark({ note: $event })"
             ></textarea>
+            @if (store.ledgerAt(store.selectedLine(), cell.position); as ledger) {
+              <div class="ledger-box">
+                @if (ledger.readings.length) {
+                  <label class="field-label">异文来源（不覆盖，按包去重）</label>
+                  <div class="ledger-readings">
+                    @for (reading of ledger.readings; track reading.char + reading.packageId) {
+                      <span class="ledger-reading"><b>{{ reading.char }}</b><i>{{ reading.editorName }} · {{ reading.packageId }}</i></span>
+                    }
+                  </div>
+                }
+                @if (ledger.notes.length) {
+                  <label class="field-label">批注留痕</label>
+                  <ul class="ledger-notes">
+                    @for (item of ledger.notes; track item.packageId + item.note) {
+                      <li>“{{ item.note }}”<small>— {{ item.editorName }}（{{ item.packageId }}）</small></li>
+                    }
+                  </ul>
+                }
+              </div>
+            }
             <nz-divider></nz-divider>
             <button nz-button nzBlock (click)="store.addAntithesis()">将此句加入对仗关系</button>
           } @else {
@@ -280,6 +300,159 @@
           <nz-empty nzNotFoundContent="请选择一份异文底本"></nz-empty>
         }
       </section>
+    </nz-tab>
+
+    <nz-tab [nzTitle]="collationTabTitle">
+      <ng-template #collationTabTitle>
+        离线校勘包
+        @if (store.pendingConflicts().length) { <nz-badge [nzCount]="store.pendingConflicts().length" [nzOverflowCount]="99"></nz-badge> }
+      </ng-template>
+      <div class="collation-layout">
+        <!-- 左：基线与整理者 -->
+        <section class="surface collation-panel">
+          <div class="section-title">
+            <div><span class="overline">BASELINE & EDITOR</span><h2>修改基线与整理者</h2></div>
+          </div>
+          <div class="collation-body">
+            <label class="field-label">整理者姓名</label>
+            <input nz-input [ngModel]="store.workspace().editor.name" (ngModelChange)="store.updateEditor({ name: $event })" />
+            <label class="field-label">校样室 / 工位</label>
+            <input nz-input [ngModel]="store.workspace().editor.room" (ngModelChange)="store.updateEditor({ room: $event })" />
+            <label class="field-label">整理者标识（随工作区保存，决定包号去重）</label>
+            <input nz-input [ngModel]="store.workspace().editor.id" (ngModelChange)="store.updateEditor({ id: $event })" />
+            <nz-divider></nz-divider>
+            @if (store.baseline(); as baseline) {
+              <div class="baseline-card">
+                <span class="overline">CURRENT BASELINE</span>
+                <strong>{{ baseline.versionName }}</strong>
+                <small>建立于 {{ baseline.capturedAt | date: 'yyyy-MM-dd HH:mm' }} · 字位摘要 {{ baseline.digest }}</small>
+                <p class="baseline-text">{{ baseline.text }}</p>
+              </div>
+            } @else {
+              <nz-alert nzType="warning" nzShowIcon nzMessage="尚未保存基线" nzDescription="导出校勘包前请先保存修改基线；未保存时将自动以主版本建立。"></nz-alert>
+            }
+            <button nz-button nzType="primary" nzBlock (click)="store.saveBaseline()">以当前版本保存修改基线</button>
+            <nz-divider></nz-divider>
+            <span class="field-label">导出校勘包（含基线、整理者与逐字位改动）</span>
+            <button nz-button nzType="primary" nzBlock (click)="store.downloadJiaoKanPackage()">导出 .json 校勘包</button>
+          </div>
+        </section>
+
+        <!-- 中：导入与对账 -->
+        <section class="surface collation-panel">
+          <div class="section-title">
+            <div><span class="overline">IMPORT & RECONCILE</span><h2>导入并按字位对账</h2></div>
+            <nz-tag>{{ store.workspace().importLog.length }} 条导入记录</nz-tag>
+          </div>
+          <div class="collation-body">
+            <input type="file" accept=".json,application/json" hidden #packageInput (change)="onPackageFile($event)" />
+            <button nz-button nzType="primary" nzBlock (click)="packageInput.click()">选择回传的校勘包…</button>
+            @if (importFileName) { <small class="file-hint">最近选择：{{ importFileName }}</small> }
+            <p class="collation-rule">单方修改直接并入；双方改字不同则两字并存、进入右侧待确认；已有异文与批注只追加来源，绝不覆盖；同一包重复导入不会新增记录。</p>
+
+            @if (store.lastImport(); as outcome) {
+              <nz-alert
+                [nzType]="outcome.ok ? (outcome.pendingTotal ? 'warning' : 'success') : 'error'"
+                nzShowIcon
+                [nzMessage]="outcome.duplicate ? '重复导入已忽略' : outcome.interrupted ? '导入中断' : '导入结果'"
+                [nzDescription]="outcome.message"
+                class="import-alert"
+              ></nz-alert>
+              <div class="outcome-pills">
+                <nz-tag nzColor="success">并入 {{ outcome.applied }}</nz-tag>
+                <nz-tag nzColor="warning">待确认 {{ outcome.pendingTotal }}</nz-tag>
+                <nz-tag nzColor="error">异常 {{ outcome.anomalies }}</nz-tag>
+                <nz-tag>跳过 {{ outcome.skipped }}</nz-tag>
+                <nz-tag>护住 {{ outcome.blockedFields }} 项原判断</nz-tag>
+                @if (outcome.legacy) { <nz-tag nzColor="processing">旧包已升级</nz-tag> }
+                @if (outcome.resumed) { <nz-tag nzColor="cyan">检查点续跑</nz-tag> }
+              </div>
+            }
+
+            @if (store.checkpoints().length) {
+              <div class="checkpoint-box">
+                <nz-alert nzType="error" nzShowIcon nzMessage="存在导入失败检查点" nzDescription="已处理部分已落盘，可从断点继续，不会重复并入。"></nz-alert>
+                @for (cp of store.checkpoints(); track cp.packageId) {
+                  <div class="checkpoint-row">
+                    <div>
+                      <strong>{{ cp.packageId }}</strong>
+                      <small>进度 {{ cp.nextIndex }}/{{ cp.total }} · 已尝试 {{ cp.attempts }} 次 · {{ cp.lastError }}</small>
+                    </div>
+                    <button nz-button nzSize="small" nzType="primary" (click)="store.retryImport(cp.packageId)">从检查点重试</button>
+                  </div>
+                }
+                <button nz-button nzSize="small" nzBlock (click)="store.retryAllImports()">一键全部重试</button>
+              </div>
+            }
+
+            <nz-divider></nz-divider>
+            <span class="field-label">演练（断网场景模拟）</span>
+            <div class="demo-row">
+              <button nz-button nzSize="small" (click)="simulateInterruptedImport()">模拟导入中途断电</button>
+              <button nz-button nzSize="small" (click)="simulateLegacyImport()">导入旧稿 v0 散件包</button>
+            </div>
+
+            <nz-divider></nz-divider>
+            <span class="field-label">导入记录（同一包仅一条）</span>
+            <nz-table [nzData]="store.importLog()" nzSize="small" [nzPageSize]="6" class="log-table">
+              <thead>
+                <tr>
+                  <th>包号 / 整理者</th><th>状态</th><th>并入</th><th>待确认</th><th>尝试</th><th>时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (row of store.importLog(); track row.packageId) {
+                  <tr>
+                    <td><strong>{{ row.packageId }}</strong><small>{{ row.editorName }}@if (row.legacy) { · 旧包}</small></td>
+                    <td>
+                      @switch (row.status) {
+                        @case ('applied') { <nz-tag nzColor="success">完成</nz-tag> }
+                        @case ('partial') { <nz-tag nzColor="warning">有待确认</nz-tag> }
+                        @case ('failed') { <nz-tag nzColor="error">中断</nz-tag> }
+                      }
+                    </td>
+                    <td>{{ row.appliedChanges }}</td>
+                    <td>{{ row.conflicts + row.anomalies }}</td>
+                    <td>{{ row.attempts }}</td>
+                    <td><small>{{ (row.finishedAt ?? row.importedAt) | date: 'MM-dd HH:mm:ss' }}</small></td>
+                  </tr>
+                }
+              </tbody>
+            </nz-table>
+          </div>
+        </section>
+
+        <!-- 右：待确认处 -->
+        <section class="surface collation-panel">
+          <div class="section-title">
+            <div><span class="overline">PENDING REVIEW</span><h2>待确认处</h2></div>
+            <nz-tag nzColor="error">{{ store.pendingConflicts().length }} 待处</nz-tag>
+          </div>
+          <div class="collation-body conflict-body">
+            @if (store.pendingConflicts().length === 0) {
+              <nz-empty nzNotFoundContent="暂无冲突，所有改动均已自动并入"></nz-empty>
+            }
+            @for (conflict of store.pendingConflicts(); track conflict.id) {
+              <article class="conflict-card">
+                <div class="conflict-head">
+                  <nz-tag nzColor="warning">{{ conflictReasonLabel(conflict.reason) }}</nz-tag>
+                  <small>第 {{ conflict.line + 1 }} 句第 {{ conflict.ch + 1 }} 字 · {{ conflict.editorName }}</small>
+                </div>
+                <div class="conflict-chars">
+                  <span><i>底</i><b>{{ conflict.base || '□' }}</b></span>
+                  <span class="local"><i>本稿</i><b>{{ conflict.local || '□' }}</b></span>
+                  <span class="incoming"><i>来稿</i><b>{{ conflict.incoming || '□' }}</b></span>
+                </div>
+                <p>{{ conflict.detail }}</p>
+                <div class="conflict-actions">
+                  <button nz-button nzSize="small" nzType="primary" (click)="store.resolveConflict(conflict.id, 'accepted')">采用来字</button>
+                  <button nz-button nzSize="small" (click)="store.resolveConflict(conflict.id, 'kept-local')">保留本字</button>
+                </div>
+              </article>
+            }
+          </div>
+        </section>
+      </div>
     </nz-tab>
 
     <nz-tab nzTitle="版本与导出">

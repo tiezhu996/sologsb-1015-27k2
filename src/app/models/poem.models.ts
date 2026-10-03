@@ -33,6 +33,20 @@ export interface PoemWorkspace {
   versions: PoemVersion[];
   activeVersionId: string;
   updatedAt: string;
+  /** 本机整理者：随工作区保存，并写入每个导出的校勘包。 */
+  editor: import('../collation/collation.models').EditorProfile;
+  /** 修改基线；未建立时为空。 */
+  baseline: import('../collation/collation.models').BaselineSnapshot | null;
+  /** 被基线锁定的版本 id。 */
+  baselineVersionId: string;
+  /** 按字位累积的异文与批注台账（跨版本）。 */
+  variantsLedger: Record<string, import('../collation/collation.models').PositionVariants>;
+  /** 离线合并产生的待确认处。 */
+  pendingConflicts: import('../collation/collation.models').PendingConflict[];
+  /** 导入记录：同一校勘包只保留一条。 */
+  importLog: import('../collation/collation.models').ImportLogEntry[];
+  /** 导入失败的检查点，重试成功后清除。 */
+  importCheckpoints: import('../collation/collation.models').FailedImportCheckpoint[];
 }
 
 export interface MeterTemplate {

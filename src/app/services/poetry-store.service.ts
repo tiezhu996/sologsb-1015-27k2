@@ -12,6 +12,27 @@ import type {
   PoemWorkspace,
   Tone,
 } from '../models/poem.models';
+import type {
+  EditorProfile,
+  FailedImportCheckpoint,
+  ImportLogEntry,
+  ImportOutcome,
+  JiaoKanPackage,
+  MergeCounters,
+  PositionVariants,
+} from '../collation/collation.models';
+import {
+  buildPackage,
+  captureBaseline,
+  checkpointOf,
+  isImportLogged,
+  markKey,
+  mergeChange,
+  migratePackage,
+  replaceCharAt,
+  toPoemCells,
+  type MergeState,
+} from '../collation/collation.engine';
 
 export const METER_TEMPLATES: MeterTemplate[] = [
   {
@@ -105,6 +126,7 @@ function initialWorkspace(): PoemWorkspace {
     marks: clone(marks),
     antithesisPairs: [],
   };
+  const baseline = captureBaseline(topVersion, now);
   return {
     title: '春晓',
     author: '孟浩然',
@@ -112,6 +134,29 @@ function initialWorkspace(): PoemWorkspace {
     versions: [topVersion, variant],
     activeVersionId: topVersion.id,
     updatedAt: now,
+    editor: { id: 'editor-local', name: '主校整理者', room: '校样室 · 主机位' },
+    baseline,
+    baselineVersionId: topVersion.id,
+    variantsLedger: {},
+    pendingConflicts: [],
+    importLog: [],
+    importCheckpoints: [],
+  };
+}
+
+/** 兼容旧版本地存档：补齐基线、整理者与合台账字段。 */
+function upgradeWorkspace(parsed: PoemWorkspace): PoemWorkspace {
+  const now = new Date().toISOString();
+  const baseVersion = parsed.versions.find((version) => version.id === parsed.baselineVersionId) ?? parsed.versions[0];
+  return {
+    ...parsed,
+    editor: parsed.editor ?? { id: 'editor-local', name: '主校整理者', room: '校样室 · 主机位' },
+    baseline: parsed.baseline ?? (baseVersion ? captureBaseline(baseVersion, now) : null),
+    baselineVersionId: parsed.baselineVersionId ?? baseVersion?.id ?? '',
+    variantsLedger: parsed.variantsLedger ?? {},
+    pendingConflicts: parsed.pendingConflicts ?? [],
+    importLog: parsed.importLog ?? [],
+    importCheckpoints: parsed.importCheckpoints ?? [],
   };
 }
 
@@ -120,7 +165,7 @@ function loadWorkspace(): PoemWorkspace {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return initialWorkspace();
     const parsed = JSON.parse(raw) as PoemWorkspace;
-    return parsed.versions?.length ? parsed : initialWorkspace();
+    return parsed.versions?.length ? upgradeWorkspace(parsed) : initialWorkspace();
   } catch {
     return initialWorkspace();
   }
@@ -136,6 +181,7 @@ export class PoetryStoreService {
   readonly toast = signal('');
   readonly undoCount = signal(0);
   readonly redoCount = signal(0);
+  readonly lastImport = signal<ImportOutcome | null>(null);
 
   private undoStack: PoemWorkspace[] = [];
   private redoStack: PoemWorkspace[] = [];
@@ -405,6 +451,292 @@ export class PoetryStoreService {
     anchor.click();
     URL.revokeObjectURL(anchor.href);
   }
+
+  /* ---------------------------------------------------------------- */
+  /* 基线 · 整理者 · 校勘包                                            */
+  /* ---------------------------------------------------------------- */
+
+  readonly pendingConflicts = computed(() => this.workspace().pendingConflicts.filter((item) => item.status === 'pending'));
+  readonly importLog = computed(() => [...this.workspace().importLog].sort((a, b) => b.importedAt.localeCompare(a.importedAt)));
+  readonly checkpoints = computed(() => this.workspace().importCheckpoints);
+
+  /** 当前工作区基线（未建立时返回 null）。 */
+  readonly baseline = computed(() => this.workspace().baseline);
+
+  updateEditor(patch: Partial<EditorProfile>): void {
+    this.commit((workspace) => {
+      workspace.editor = { ...workspace.editor, ...patch };
+    });
+  }
+
+  /** 以指定版本（默认当前版本）保存修改基线，之后导出的校勘包都携带它。 */
+  saveBaseline(versionId?: string): void {
+    const workspace = this.workspace();
+    const version = workspace.versions.find((item) => item.id === (versionId ?? workspace.activeVersionId)) ?? workspace.versions[0];
+    const baseline = captureBaseline(version, new Date().toISOString());
+    this.commit((next) => {
+      next.baseline = baseline;
+      next.baselineVersionId = version.id;
+    });
+    this.toast.set(`已保存基线：${version.name}`);
+  }
+
+  /** 导出当前校勘稿相对基线的校勘包（JSON，内含整理者与基线信息）。 */
+  exportJiaoKanPackage(): JiaoKanPackage {
+    const workspace = this.workspace();
+    let baseline = workspace.baseline;
+    if (!baseline) {
+      // 尚未保存过基线时，以主版本建立基线，保证离线可对账。
+      baseline = captureBaseline(workspace.versions[0], new Date().toISOString());
+      this.commit((next) => {
+        next.baseline = baseline;
+        next.baselineVersionId = next.versions[0].id;
+      });
+    }
+    const version = this.activeVersion();
+    return buildPackage({
+      poemTitle: workspace.title,
+      editor: workspace.editor,
+      baseline,
+      version: { id: version.id, name: version.name, source: version.source, text: version.text, marks: version.marks },
+    }, new Date().toISOString());
+  }
+
+  downloadJiaoKanPackage(): void {
+    const pkg = this.exportJiaoKanPackage();
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json;charset=utf-8' }));
+    anchor.download = `校勘包-${pkg.editor.name}-${pkg.packageId}.json`;
+    anchor.click();
+    URL.revokeObjectURL(anchor.href);
+    this.toast.set(`校勘包 ${pkg.packageId} 已导出（含基线与整理者）`);
+  }
+
+  /**
+   * 导入校勘包文本。
+   * @param rawText 校勘包 JSON 文本
+   * @param failAfterChange 演练用：处理到第 N 条改动时模拟断电，用于验证检查点重试。
+   */
+  importJiaoKanPackage(rawText: string, failAfterChange?: number): ImportOutcome {
+    let migrated: ReturnType<typeof migratePackage>;
+    try {
+      migrated = migratePackage(JSON.parse(rawText), {
+        title: this.workspace().title,
+        versions: this.workspace().versions.map((version) => ({
+          id: version.id, name: version.name, source: version.source, text: version.text, marks: version.marks,
+        })),
+      });
+    } catch (error) {
+      const outcome: ImportOutcome = {
+        ok: false, packageId: '', editorName: '', applied: 0, conflicts: 0, anomalies: 0, skipped: 0,
+        blockedFields: 0, pendingTotal: this.pendingConflicts().length, legacy: false,
+        message: `校勘包无法解析：${(error as Error).message}`, hardError: (error as Error).message,
+      };
+      this.lastImport.set(outcome);
+      this.toast.set(outcome.message);
+      return outcome;
+    }
+
+    const pkg = migrated.pkg;
+    const workspace = this.workspace();
+    if (isImportLogged(workspace.importLog, pkg.packageId) && !checkpointOf(workspace.importCheckpoints, pkg.packageId)) {
+      const outcome: ImportOutcome = {
+        ok: true, duplicate: true, packageId: pkg.packageId, editorName: pkg.editor.name,
+        applied: 0, conflicts: 0, anomalies: 0, skipped: pkg.changes.length, blockedFields: 0,
+        pendingTotal: this.pendingConflicts().length, legacy: migrated.legacy,
+        message: `校勘包 ${pkg.packageId} 已导入过，未重复生成记录`,
+      };
+      this.lastImport.set(outcome);
+      this.toast.set('同一校勘包再次导入：已忽略，只保留原记录');
+      return outcome;
+    }
+
+    const resumedCheckpoint = checkpointOf(workspace.importCheckpoints, pkg.packageId);
+    const now = new Date().toISOString();
+    const target = workspace.versions.find((version) => version.id === pkg.baseline.versionId)
+      ?? workspace.versions.find((version) => version.id === workspace.baselineVersionId)
+      ?? workspace.versions[0];
+
+    const state: MergeState = {
+      text: target.text,
+      marks: clone(target.marks),
+      variants: clone(workspace.variantsLedger),
+      conflicts: clone(workspace.pendingConflicts),
+      appliedPositions: resumedCheckpoint ? [...resumedCheckpoint.appliedPositions] : [],
+    };
+    const seen = new Set<string>();
+    const counters: MergeCounters = resumedCheckpoint
+      ? { ...resumedCheckpoint.counters }
+      : { applied: 0, conflicts: 0, anomalies: 0, skipped: 0, blockedFields: 0 };
+
+    const start = resumedCheckpoint?.nextIndex ?? 0;
+    let interrupted = false;
+    let hardError: string | undefined;
+    let nextIndex = start;
+
+    try {
+      for (let index = start; index < pkg.changes.length; index += 1) {
+        if (failAfterChange !== undefined && index === start + failAfterChange) {
+          throw new Error('导入在中途中断（演练）');
+        }
+        mergeChange(state, pkg.changes[index], pkg, seen, counters, now, resumedCheckpoint?.packageId);
+        nextIndex = index + 1;
+      }
+    } catch (error) {
+      interrupted = true;
+      hardError = (error as Error).message;
+      const checkpoint: FailedImportCheckpoint = {
+        packageId: pkg.packageId,
+        pkg,
+        nextIndex,
+        total: pkg.changes.length,
+        appliedPositions: state.appliedPositions,
+        counters: { ...counters },
+        startedAt: resumedCheckpoint?.startedAt ?? now,
+        updatedAt: new Date().toISOString(),
+        attempts: (resumedCheckpoint?.attempts ?? 0) + 1,
+        legacy: migrated.legacy,
+        lastError: hardError,
+      };
+      // 中断也把已对账部分落盘，避免前功尽弃；检查点记录续跑位置。
+      this.commit((next) => {
+        const targetVersion = this.findVersion(next, target.id);
+        targetVersion.text = state.text;
+        targetVersion.marks = state.marks;
+        next.variantsLedger = state.variants;
+        next.pendingConflicts = state.conflicts;
+        const others = next.importCheckpoints.filter((item) => item.packageId !== pkg.packageId);
+        others.push(checkpoint);
+        next.importCheckpoints = others;
+        this.upsertLogEntry(next, {
+          packageId: pkg.packageId,
+          editorName: pkg.editor.name,
+          exportedAt: pkg.exportedAt,
+          importedAt: checkpoint.startedAt,
+          status: 'failed',
+          appliedChanges: counters.applied,
+          conflicts: counters.conflicts,
+          anomalies: counters.anomalies,
+          skipped: counters.skipped,
+          blockedFields: counters.blockedFields,
+          legacy: migrated.legacy,
+          attempts: checkpoint.attempts,
+          lastError: hardError,
+        });
+      });
+      const outcome: ImportOutcome = {
+        ok: false, interrupted: true, resumed: !!resumedCheckpoint, packageId: pkg.packageId,
+        editorName: pkg.editor.name, ...counters,
+        pendingTotal: state.conflicts.filter((item) => item.status === 'pending').length,
+        legacy: migrated.legacy, message: `导入在第 ${checkpoint.nextIndex + 1}/${pkg.changes.length} 条处中断，已存检查点，可重试续跑`,
+        hardError,
+      };
+      this.lastImport.set(outcome);
+      this.toast.set(outcome.message);
+      return outcome;
+    }
+
+    const pendingTotal = state.conflicts.filter((item) => item.status === 'pending').length;
+    const status = pendingTotal > 0 ? 'partial' as const : 'applied' as const;
+    this.commit((next) => {
+      const targetVersion = this.findVersion(next, target.id);
+      targetVersion.text = state.text;
+      targetVersion.marks = state.marks;
+      next.variantsLedger = state.variants;
+      next.pendingConflicts = state.conflicts;
+      next.importCheckpoints = next.importCheckpoints.filter((item) => item.packageId !== pkg.packageId);
+      this.upsertLogEntry(next, {
+        packageId: pkg.packageId,
+        editorName: pkg.editor.name,
+        exportedAt: pkg.exportedAt,
+        importedAt: resumedCheckpoint?.startedAt ?? now,
+        finishedAt: new Date().toISOString(),
+        status,
+        appliedChanges: counters.applied,
+        conflicts: counters.conflicts,
+        anomalies: counters.anomalies,
+        skipped: counters.skipped,
+        blockedFields: counters.blockedFields,
+        legacy: migrated.legacy,
+        attempts: (resumedCheckpoint?.attempts ?? 0) + 1,
+      });
+    });
+
+    const outcome: ImportOutcome = {
+      ok: true, resumed: !!resumedCheckpoint, interrupted: false, packageId: pkg.packageId,
+      editorName: pkg.editor.name, ...counters, pendingTotal, legacy: migrated.legacy,
+      message: resumedCheckpoint
+        ? `已从检查点续跑完成：并入 ${counters.applied} 处，待确认 ${pendingTotal} 处`
+        : status === 'partial'
+          ? `导入完成：并入 ${counters.applied} 处，${pendingTotal} 处冲突已放入待确认`
+          : `导入完成：并入 ${counters.applied} 处，无冲突`,
+    };
+    this.lastImport.set(outcome);
+    this.toast.set(outcome.message);
+    return outcome;
+  }
+
+  /** 从失败检查点重试指定校勘包。 */
+  retryImport(packageId: string): ImportOutcome | null {
+    const checkpoint = this.workspace().importCheckpoints.find((item) => item.packageId === packageId);
+    if (!checkpoint) return null;
+    return this.importJiaoKanPackage(JSON.stringify(checkpoint.pkg));
+  }
+
+  retryAllImports(): void {
+    const ids = this.workspace().importCheckpoints.map((item) => item.packageId);
+    ids.forEach((id) => this.retryImport(id));
+  }
+
+  /** 待确认处处置：采用来字 / 保留本字 / 暂不处理。 */
+  resolveConflict(id: string, decision: 'accepted' | 'kept-local'): void {
+    this.commit((workspace) => {
+      const conflict = workspace.pendingConflicts.find((item) => item.id === id);
+      if (!conflict || conflict.status !== 'pending') return;
+      conflict.status = decision;
+      conflict.resolvedAt = new Date().toISOString();
+      const target = workspace.versions.find((version) => version.id === workspace.baselineVersionId) ?? workspace.versions[0];
+      // 以当前文本的字位坐标为准（导入可能已改动过前后字位）。
+      const cell = toPoemCells(target.text)[conflict.pos];
+      if (decision === 'accepted' && conflict.incoming) {
+        target.text = replaceCharAt(target.text, conflict.pos, conflict.incoming);
+      }
+      if (conflict.incomingMarkPatch && cell) {
+        // 处置时同样只填补空缺标注，已有判断不覆盖。
+        const k = markKey(cell.line, cell.ch);
+        const current = target.marks[k];
+        const fill: Record<string, unknown> = {};
+        for (const [field, value] of Object.entries(conflict.incomingMarkPatch)) {
+          if (field === 'note') continue;
+          const existing = current?.[field as keyof CharacterMark];
+          const empty = existing === undefined || existing === '' || existing === false || existing === '?';
+          if (empty && value !== undefined && value !== '') fill[field] = value;
+        }
+        if (Object.keys(fill).length) {
+          target.marks[k] = { ...{ tone: '?', rhyme: '', pauseAfter: false, basis: '', note: '' }, ...(current ?? {}), ...fill } as CharacterMark;
+        }
+      }
+    });
+    this.toast.set(decision === 'accepted' ? '已采用来字并记录来源' : '已保留本字，来源仍留台账');
+  }
+
+  /** 取某字位的异文与批注台账。 */
+  ledgerAt(line: number, ch: number): PositionVariants | undefined {
+    return this.workspace().variantsLedger[markKey(line, ch)];
+  }
+
+  private findVersion(workspace: PoemWorkspace, id: string): PoemVersion {
+    return workspace.versions.find((version) => version.id === id) ?? workspace.versions[0];
+  }
+
+  /** 同一包只保留一条导入记录：失败时更新，成功时定稿。 */
+  private upsertLogEntry(workspace: PoemWorkspace, entry: ImportLogEntry): void {
+    const index = workspace.importLog.findIndex((item) => item.packageId === entry.packageId);
+    if (index === -1) workspace.importLog.push(entry);
+    else workspace.importLog[index] = { ...workspace.importLog[index], ...entry };
+  }
+
+  /* ---------------------------------------------------------------- */
 
   selectedCell(): AnalysisCell | undefined {
     return this.analysis()[this.selectedLine()]?.cells[this.selectedPosition()];

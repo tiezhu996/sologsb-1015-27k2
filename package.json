@@ -6,7 +6,8 @@
     "start": "ng serve",
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
-    "test": "ng test"
+    "test": "ng test",
+    "test:node": "node scripts/run-node-tests.cjs src/app/collation/collation.engine.spec.ts"
   },
   "private": true,
   "dependencies": {
